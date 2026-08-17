@@ -34,8 +34,10 @@ export default function CallPage() {
   const [error, setError] = useState("");
   const [bridgeState, setBridgeState] = useState<"idle" | "connecting" | "open" | "closed" | "error">("idle");
   const [micOn, setMicOn] = useState(false);
+  const [volume, setVolume] = useState(100);
   const bridgeRef = useRef<CallMediaBridge | null>(null);
   const activeCallIdRef = useRef<string | null>(null);
+  const reconnectPendingRef = useRef(false);
 
   useEffect(() => {
     api<{ devices?: DeviceEntry[] }>("/devices")
@@ -98,6 +100,33 @@ export default function CallPage() {
       setError("音频连接失败：可能通话尚未接通，或 IMS 媒体未就绪。请确认状态为“通话中”后重试。");
     }
   }, [bridgeState]);
+
+  // Auto-reconnect the audio bridge if it drops while a call is still active.
+  useEffect(() => {
+    const mediaCall = calls.find((call) => call.mediaReady && !call.endedAt);
+    if (
+      mediaCall !== undefined &&
+      (bridgeState === "closed" || bridgeState === "error") &&
+      !reconnectPendingRef.current
+    ) {
+      reconnectPendingRef.current = true;
+      const timer = window.setTimeout(() => {
+        reconnectPendingRef.current = false;
+        if (activeCallIdRef.current !== null) {
+          const bridge = ensureBridge();
+          bridge
+            .connect(callMediaSocketURL(deviceId, activeCallIdRef.current))
+            .catch(() => setError("音频重连失败"));
+        }
+      }, 1500);
+      return () => {
+        window.clearTimeout(timer);
+        reconnectPendingRef.current = false;
+      };
+    }
+    if (bridgeState === "open") reconnectPendingRef.current = false;
+    return undefined;
+  }, [bridgeState, calls, deviceId, ensureBridge]);
 
   useEffect(() => () => bridgeRef.current?.destroy(), []);
 
@@ -240,26 +269,30 @@ export default function CallPage() {
 
         <div className="mt-4 flex items-center justify-center gap-3">
           {active && (
-            <button
-              type="button"
-              onClick={startListening}
-              className="animate-pulse rounded-full bg-green-600 px-6 py-3 font-semibold text-white transition hover:bg-green-500 active:scale-95"
-            >
-              点击开始收听（通话中）
-            </button>
-          )}
-          {incoming && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void runAction("answer", incoming.id)}
-              className="rounded-full bg-amber-500 px-6 py-3 font-semibold text-white transition hover:bg-amber-400 active:scale-95 disabled:opacity-40"
-            >
-              接听
-            </button>
-          )}
-          {active && (
             <>
+              <button
+                type="button"
+                onClick={startListening}
+                className="animate-pulse rounded-full bg-green-600 px-6 py-3 font-semibold text-white transition hover:bg-green-500 active:scale-95"
+              >
+                点击开始收听（通话中）
+              </button>
+              <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+                音量
+                <input
+                  type="range"
+                  min={0}
+                  max={200}
+                  value={volume}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setVolume(value);
+                    ensureBridge().setVolume(value / 100);
+                  }}
+                  className="w-28 accent-green-600"
+                />
+                <span className="w-9 text-right tabular-nums">{volume}%</span>
+              </label>
               <button
                 type="button"
                 onClick={() => void toggleMic()}
@@ -281,6 +314,16 @@ export default function CallPage() {
                 挂断
               </button>
             </>
+          )}
+          {incoming && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void runAction("answer", incoming.id)}
+              className="rounded-full bg-amber-500 px-6 py-3 font-semibold text-white transition hover:bg-amber-400 active:scale-95 disabled:opacity-40"
+            >
+              接听
+            </button>
           )}
         </div>
       </div>

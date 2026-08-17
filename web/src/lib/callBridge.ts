@@ -12,8 +12,10 @@ export class CallMediaBridge {
   private ws: WebSocket | null = null;
   private ctx: AudioContext | null = null;
   private script: ScriptProcessorNode | null = null;
+  private gain: GainNode | null = null;
   private micStream: MediaStream | null = null;
   private micSource: MediaStreamAudioSourceNode | null = null;
+  private volumeValue = 1;
 
   private queue: Int16Array[] = [];
   private queueBytes = 0;
@@ -55,7 +57,10 @@ export class CallMediaBridge {
       };
       this.script = this.ctx.createScriptProcessor(512, 1, 1);
       this.script.onaudioprocess = (event) => this.onAudioProcess(event);
-      this.script.connect(this.ctx.destination);
+      this.gain = this.ctx.createGain();
+      this.gain.gain.value = this.volumeValue;
+      this.script.connect(this.gain);
+      this.gain.connect(this.ctx.destination);
     }
     await this.ctx.resume().catch(() => { /* gesture may be required; handled above */ });
     this.ws = new WebSocket(url);
@@ -69,6 +74,16 @@ export class CallMediaBridge {
   /** Explicitly resume audio output (call from a user gesture). */
   resumeAudio() {
     if (this.ctx && this.ctx.state === "suspended") void this.ctx.resume();
+  }
+
+  /** Set downlink playback volume (0..2, 1 = 100%). */
+  setVolume(volume: number) {
+    this.volumeValue = Math.min(2, Math.max(0, volume));
+    if (this.gain) this.gain.gain.value = this.volumeValue;
+  }
+
+  get volume(): number {
+    return this.volumeValue;
   }
 
   disconnect() {
