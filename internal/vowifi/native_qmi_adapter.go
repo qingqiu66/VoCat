@@ -18,6 +18,10 @@ type NativeQMIController interface {
 	NativeQMIRadioSnapshot(context.Context, string) (mode int, psAttached bool, err error)
 	StopNativeQMICellularData(context.Context, string) error
 	SetNativeQMIRadioOff(context.Context, string, bool) error
+	// ReadNativeQMIATSMSCenter returns the raw AT+CSCA? response text for the
+	// modem's SIM so the IMS SMS submit can populate the RP service-centre
+	// address without a configured fallback.
+	ReadNativeQMIATSMSCenter(context.Context, string) (string, error)
 }
 
 type NativeQMIAdapter struct {
@@ -38,6 +42,7 @@ type nativeQMIBinding struct {
 var _ SIMIdentityReader = (*NativeQMIAdapter)(nil)
 var _ PreferredAKAProvider = (*NativeQMIAdapter)(nil)
 var _ RadioController = (*NativeQMIAdapter)(nil)
+var _ SMSCenterReader = (*NativeQMIAdapter)(nil)
 
 func NewNativeQMIAdapter(controller NativeQMIController, purePolicy func(string) bool) (*NativeQMIAdapter, error) {
 	if controller == nil {
@@ -174,4 +179,30 @@ func (adapter *NativeQMIAdapter) Restore(ctx context.Context, deviceID string, s
 	// was online, never a packet context that was detached for VoWiFi.
 	off := snapshot.PureAirplanePolicy || snapshot.OperatingMode != 1
 	return adapter.controller.SetNativeQMIRadioOff(ctx, deviceID, off)
+}
+
+// ReadSMSCenter returns the SMS service-centre address stored on the SIM,
+// read through the modem's AT interface (AT+CSCA?). IMS SMS submit requires
+// an RP service-centre address, and the native OpenStick 410 has no
+// circuit-switched network to learn one from.
+func (adapter *NativeQMIAdapter) ReadSMSCenter(ctx context.Context, deviceID string) (string, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	raw, err := adapter.controller.ReadNativeQMIATSMSCenter(ctx, deviceID)
+	if err != nil {
+		return "", fmt.Errorf("read native QMI SMS service centre: %w", err)
+	}
+	index := strings.Index(raw, "+CSCA:")
+	if index < 0 {
+		return "", errors.New("vocat: modem returned no SMS service-centre address")
+	}
+	fields := parseCSV(strings.TrimSpace(raw[index+len("+CSCA:"):]))
+	if len(fields) == 0 {
+		return "", errors.New("vocat: modem returned no SMS service-centre address")
+	}
+	value := strings.Trim(strings.TrimSpace(fields[0]), `"`)
+	digits := strings.TrimPrefix(value, "+")
+	if !validDigits(digits, 3, 20) {
+		return "", errors.New("vocat: modem returned an invalid SMS service-centre address")
+	}
+	return value, nil
 }

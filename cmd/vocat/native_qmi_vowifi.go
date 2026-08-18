@@ -74,3 +74,11 @@ func (mapper nativeQMIControllerMapper) SetNativeQMIRadioOff(ctx context.Context
 	}
 	return mapper.Devices.SetNativeQMIRadioOff(ctx, physical, off)
 }
+
+func (mapper nativeQMIControllerMapper) ReadNativeQMIATSMSCenter(ctx context.Context, id string) (string, error) {
+	physical, err := mapper.physical(id)
+	if err != nil {
+		return "", err
+	}
+	return mapper.Devices.ReadNativeQMIATSMSCenter(ctx, physical)
+}
