@@ -28,6 +28,7 @@ type DeviceController interface {
 	List() []device.Device
 	Get(string) (device.Device, error)
 	Refresh(context.Context, string) (device.Snapshot, error)
+	RecoverModem(context.Context) error
 	ExecuteAT(context.Context, string, string) (modem.Response, error)
 	Reboot(context.Context, string) error
 	USSD(context.Context, string, string) (device.USSDResult, error)
@@ -599,6 +600,28 @@ func (s *Server) handleDevicePath(
 		}
 		s.clearPublicIP(config.ID)
 		writeJSON(w, http.StatusAccepted, map[string]any{"data": map[string]any{"status": "rebooting"}})
+	case "actions/recover-modem":
+		if !requireMethod(w, r, http.MethodPost) {
+			return true
+		}
+		if !s.requirePhysicalDevice(w, physicalPresent) {
+			return true
+		}
+		// Restarting the modem blocks for ~20 seconds (the kernel rproc stop
+		// and start handshake) and must never tie up the HTTP handler or a
+		// client connection. Run it in the background; the frontend already
+		// re-polls the device overview on a timer after this returns.
+		go func() {
+			recoverContext, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			if err := s.devices.RecoverModem(recoverContext); err != nil {
+				s.logger.Warn("manual modem recovery failed", "device_id", config.ID, "error", err)
+				return
+			}
+			s.clearPublicIP(config.ID)
+			s.logger.Info("manual modem recovery completed", "device_id", config.ID)
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]any{"data": map[string]any{"status": "modem-recovering", "message": "modem restart started; SIM card will be re-detected"}})
 	case "flight-mode":
 		if !s.requirePhysicalDevice(w, physicalPresent) {
 			return true

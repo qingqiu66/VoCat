@@ -276,16 +276,16 @@ export default function DevicesPage() {
   const handleRebootModem = useCallback(async () => {
     const id = selectedIdRef.current.trim();
     if (!id) return false;
-    const ok = await confirmDialog(tf("确定对设备 {id} 发送重启模组指令？设备将在此期间脱网和失联数秒。", { id }), t("确认重启"), {
-      confirmText: t("立即重启"),
+    const ok = await confirmDialog(tf("确定重启 {id} 的模组？仅重启 modem（约 20 秒），不会重启整个设备，重启后会自动重新检测 SIM 卡。", { id }), t("确认重启模组"), {
+      confirmText: t("立即重启模组"),
       cancelText: t("取消"),
       type: "warning",
     });
     if (!ok) return false;
     setRebooting(true);
     try {
-      await api(`/devices/${id}/actions/reboot`, { method: "POST" });
-      message.success(t("重启指令已送达，设备正在重新启动"));
+      await api(`/devices/${id}/actions/recover-modem`, { method: "POST" });
+      message.success(t("模组重启指令已送达，正在重新检测 SIM 卡"));
       refreshAll().catch(() => {});
       refreshSoon(5000);
       return true;

@@ -82,11 +82,6 @@ func main() {
 			logger.Error("doctor failed", "error", err)
 			os.Exit(1)
 		}
-	case "carrier":
-		if err := runCarrier(rest, os.Stdout); err != nil {
-			logger.Error("carrier command failed", "error", err)
-			os.Exit(1)
-		}
 	case "menu":
 		if err := runMenu(logger); err != nil {
 			logger.Error("menu failed", "error", err)
@@ -129,10 +124,6 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
-	}
-	carrierProfileDir := filepath.Join(filepath.Dir(cfg.DatabasePath), "carrier-profiles.d")
-	if err := vowifi.LoadCarrierProfileDirectory(carrierProfileDir); err != nil {
-		return fmt.Errorf("load installed carrier profiles: %w", err)
 	}
 	instanceLock, err := lockServerInstance(cfg.DatabasePath)
 	if err != nil {
@@ -957,6 +948,10 @@ func pollDeviceSnapshots(
 	database *store.Store,
 	manager *device.Manager,
 ) {
+	// Tracks card regressions so a hot-swapped SIM is recovered by restarting
+	// the modem without rebooting the host (see cardRecovery below).
+	recovery := newCardRecovery()
+
 	refresh := func() {
 		discoveryContext, cancelDiscovery := context.WithTimeout(ctx, 10*time.Second)
 		_, err := manager.Discover(discoveryContext)
@@ -997,6 +992,17 @@ func pollDeviceSnapshots(
 				if refreshErr == nil && ctx.Err() == nil {
 					enforceCardRegion(ctx, logger, database, manager, entry.ID, &snapshot)
 					enforceDefaultSafeCardPolicy(ctx, logger, database, manager, entry.ID, &snapshot)
+					if recovery.observe(entry.ID, &snapshot) {
+						go func() {
+							recoverContext, cancelRecover := context.WithTimeout(ctx, 90*time.Second)
+							defer cancelRecover()
+							if err := manager.RecoverModem(recoverContext); err != nil {
+								logger.Warn("modem recovery failed", "device_id", entry.ID, "error", err)
+							} else {
+								logger.Info("modem restarted after card regression; SIM will be re-detected", "device_id", entry.ID)
+							}
+						}()
+					}
 				}
 			}()
 		}
@@ -1013,6 +1019,68 @@ func pollDeviceSnapshots(
 			refresh()
 		}
 	}
+}
+
+// cardRecovery tracks a device that previously reported a working SIM and now
+// reports none. A hot SIM swap on some modems leaves the UIM interface stuck in
+// a removed state that only a modem restart clears; the periodic snapshot
+// refresh alone cannot fix it. When the regression persists long enough the
+// modem remoteproc is restarted so the new card is re-probed without rebooting
+// the host.
+type cardRecovery struct {
+	mu           sync.Mutex
+	hadCard      map[string]bool
+	missingSince map[string]time.Time
+	lastRecovery time.Time
+}
+
+const (
+	cardMissingBeforeRecovery      = 90 * time.Second
+	cardMissingBeforeFirstRecovery = 5 * time.Minute
+	modemRecoveryCooldown          = 15 * time.Minute
+)
+
+func newCardRecovery() *cardRecovery {
+	return &cardRecovery{
+		hadCard:      make(map[string]bool),
+		missingSince: make(map[string]time.Time),
+	}
+}
+
+// observe records the latest snapshot for one device and reports whether a
+// modem recovery should be triggered now. A device that has previously shown a
+// working card is recovered quickly after a card regression (a hot swap that
+// leaves the UIM stuck); a device that has never shown a card gets one delayed
+// attempt so a modem that boots with a stuck SIM interface still recovers.
+// Recoveries are rate-limited so an intentionally cardless slot does not
+// restart the modem repeatedly.
+func (r *cardRecovery) observe(id string, snapshot *device.Snapshot) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	hasCard := snapshot != nil && snapshot.SIMReady && strings.TrimSpace(snapshot.ICCID) != ""
+	if hasCard {
+		r.hadCard[id] = true
+		delete(r.missingSince, id)
+		return false
+	}
+	threshold := cardMissingBeforeRecovery
+	if !r.hadCard[id] {
+		threshold = cardMissingBeforeFirstRecovery
+	}
+	since, ok := r.missingSince[id]
+	if !ok {
+		r.missingSince[id] = time.Now()
+		return false
+	}
+	if time.Since(since) < threshold {
+		return false
+	}
+	if time.Since(r.lastRecovery) < modemRecoveryCooldown {
+		return false
+	}
+	r.lastRecovery = time.Now()
+	delete(r.missingSince, id)
+	return true
 }
 
 // enforceDefaultSafeCardPolicy handles a newly inserted physical SIM or a

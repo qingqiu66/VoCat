@@ -28,6 +28,7 @@ type Options struct {
 type Manager struct {
 	mu             sync.RWMutex
 	uiccMu         sync.Mutex // serializes all multi-command UICC/APDU transactions
+	recoverMu      sync.Mutex // serializes modem recoveries
 	esimMu         sync.Mutex // serializes eSIM card access (list/switch/download)
 	esimRecoveryMu sync.Mutex
 	esimRecoveries map[string]chan struct{}

@@ -236,10 +236,6 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	if store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeWiFi410 {
-		writeError(w, http.StatusNotImplemented, "device_feature_unsupported", "SMS is not supported by the native OpenStick 410 backend")
-		return
-	}
 	entry, physicalID, present := s.physicalForConfig(config)
 	if !s.requirePhysicalDevice(w, present) {
 		return
